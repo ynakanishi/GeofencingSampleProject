@@ -1,14 +1,20 @@
 package com.example.geofencingsample;
 
 import android.app.Activity;
+import android.app.Dialog;
 import android.app.PendingIntent;
 import android.content.Intent;
+import android.content.IntentSender;
 import android.net.Uri;
 import android.os.Bundle;
+import android.support.v4.app.DialogFragment;
+import android.support.v4.app.FragmentActivity;
+import android.util.Log;
 import android.view.Menu;
 import android.view.View;
 import android.widget.Button;
 import com.google.android.gms.common.ConnectionResult;
+import com.google.android.gms.common.GooglePlayServicesClient;
 import com.google.android.gms.common.GooglePlayServicesUtil;
 import com.google.android.gms.location.Geofence;
 import com.google.android.gms.location.LocationClient;
@@ -16,15 +22,13 @@ import com.google.android.gms.location.LocationClient;
 import java.util.ArrayList;
 import java.util.List;
 
-import static com.google.android.gms.common.GooglePlayServicesClient.ConnectionCallbacks;
-import static com.google.android.gms.common.GooglePlayServicesClient.OnConnectionFailedListener;
-import static com.google.android.gms.location.LocationClient.OnAddGeofencesResultListener;
-
-public class MainActivity extends Activity
-        implements ConnectionCallbacks,
-        OnConnectionFailedListener,
-        OnAddGeofencesResultListener,
+public class MainActivity extends FragmentActivity
+        implements GooglePlayServicesClient.ConnectionCallbacks,
+        GooglePlayServicesClient.OnConnectionFailedListener,
+        LocationClient.OnAddGeofencesResultListener,
         LocationClient.OnRemoveGeofencesResultListener {
+    private static final String TAG = MainActivity.class.getSimpleName();
+
     // 東京スカイツリーの緯度・経度が中心。
     // 自分の所在地の緯度・経度を入れると試験しやすい。
     private static final double FENCE_LATITUDE = 35.710057714926265;
@@ -39,14 +43,20 @@ public class MainActivity extends Activity
     // スカイツリーの公式ウェブサイトURL
     private final static String SKYTREE_URL = "http://www.tokyo-skytree.jp/";
 
+    // フェンスの追加・削除リクエストを示す定数
     private final static int ADD_FENCE = 0;
     private final static int REMOVE_FENCE = 1;
 
-    private MainActivity self = this;
-    private LocationClient mLocationClient;
-    private boolean mInProgress;
-    private int mRequestType;
+    // Google Play Services へのリクエストコード
+    private final static int
+            CONNECTION_FAILURE_RESOLUTION_REQUEST = 9000;
 
+    // LocationClientのインスタンス
+    private LocationClient mLocationClient;
+    // LocationClientへの処理要求中かどうかを管理するフラグ
+    private boolean mInProgress;
+    // LocationClientに要求する処理の種類 (ADD_FENCE または REMOVE_FENCE)
+    private int mRequestType;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -62,10 +72,8 @@ public class MainActivity extends Activity
             @Override
             public void onClick(View v) {
                 mRequestType = ADD_FENCE;
-                mLocationClient = new LocationClient(self, self, self);
                 if (!mInProgress) {
-                    mInProgress = true;
-                    mLocationClient.connect();
+                    requestConnectLocationClient();
                 }
             }
         });
@@ -74,10 +82,8 @@ public class MainActivity extends Activity
             @Override
             public void onClick(View v) {
                 mRequestType = REMOVE_FENCE;
-                mLocationClient = new LocationClient(self, self, self);
                 if (!mInProgress) {
-                    mInProgress = true;
-                    mLocationClient.connect();
+                    requestConnectLocationClient();
                 }
             }
         });
@@ -89,13 +95,61 @@ public class MainActivity extends Activity
         return true;
     }
 
+    @Override
+    protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+        if (requestCode == CONNECTION_FAILURE_RESOLUTION_REQUEST) {
+            if (resultCode == Activity.RESULT_OK) {
+                // Google Play Services が問題を解決した場合、再接続する
+                if (mRequestType == ADD_FENCE || mRequestType == REMOVE_FENCE) {
+                    mInProgress = false;
+                    requestConnectLocationClient();
+                }
+            } else {
+                // Google Play Servicesで問題が解決されなかった場合、ログ出力
+                Log.d(TAG, "google play no resolution error");
+            }
+        } else {
+            Log.d(TAG, "unknown request code: " + requestCode);
+        }
+    }
+
+    // LocationClient に接続する
+    private void requestConnectLocationClient() {
+        getLocationClient().connect();
+    }
+
+    // LocationClientのインスタンスを取得する
+    private LocationClient getLocationClient() {
+        if (mLocationClient == null) {
+            mLocationClient = new LocationClient(this, this, this);
+        }
+
+        return mLocationClient;
+    }
+
     // Google Play Services への接続チェック
     private boolean servicesConnected() {
         int resultCode = GooglePlayServicesUtil.isGooglePlayServicesAvailable(this);
         if (resultCode == ConnectionResult.SUCCESS) {
             return true;
         } else {
-            // Google Playに接続できない時のエラー処理(省略)
+            // Google Playに正常に接続できない時のエラー処理。
+            // (Googleが以下のページで紹介している例には少しバグがあるので要修正)
+            // ex. http://developer.android.com/training/location/geofencing.html
+            Dialog errorDialog = GooglePlayServicesUtil.getErrorDialog(
+                    resultCode,
+                    this,
+                    CONNECTION_FAILURE_RESOLUTION_REQUEST
+            );
+
+            if (errorDialog != null) {
+                ErrorDialogFragment errorDialogFragment =
+                        new ErrorDialogFragment();
+                errorDialogFragment.setDialog(errorDialog);
+                errorDialogFragment.show(getSupportFragmentManager(),
+                        "Geofence Sample");
+            }
+
             return false;
         }
     }
@@ -136,6 +190,7 @@ public class MainActivity extends Activity
         mLocationClient.removeGeofences(fenceIdList, this);
     }
 
+    // LocationClientに接続したら呼ばれる
     @Override
     public void onConnected(Bundle bundle) {
         switch(mRequestType) {
@@ -154,17 +209,35 @@ public class MainActivity extends Activity
         }
     }
 
+    // LocationClientから切断したら呼ばれる
     @Override
     public void onDisconnected() {
         mInProgress = false;
         mLocationClient = null;
     }
 
+    // Google Play services への接続に失敗した場合に呼ばれる
+    // hasResolution()がtrueの場合は、Google Play services に解決を要求する。
+    // そうでない場合は、解決方法が無いのでエラー表示する(本サンプルではログ出力)
     @Override
     public void onConnectionFailed(ConnectionResult connectionResult) {
         mInProgress = false;
 
-        // Googleアカウント接続エラーなどの対処(省略)
+        /*
+         * Google Play services が問題解決できる場合、Google Play servicesを
+         * 呼び出して、解決を要求する。
+         */
+        if (connectionResult.hasResolution()) {
+            try {
+                connectionResult.startResolutionForResult(this,
+                        CONNECTION_FAILURE_RESOLUTION_REQUEST);
+            } catch (IntentSender.SendIntentException e) {
+                e.printStackTrace();
+            }
+        } else {
+            // connectionResult.getErrorCode() の値によるエラー通知する
+            Log.d(TAG, "connection failed error code: " + connectionResult.getErrorCode());
+        }
     }
 
     @Override
@@ -186,5 +259,24 @@ public class MainActivity extends Activity
             PendingIntent pendingIntent) {
         mInProgress = false;
         mLocationClient.disconnect();
+    }
+
+
+    private static class ErrorDialogFragment extends DialogFragment {
+        private Dialog mDialog;
+
+        public ErrorDialogFragment() {
+            super();
+            mDialog = null;
+        }
+
+        public void setDialog(Dialog dialog) {
+            mDialog = dialog;
+        }
+
+        @Override
+        public Dialog onCreateDialog(Bundle savedInstanceState) {
+            return mDialog;
+        }
     }
 }
